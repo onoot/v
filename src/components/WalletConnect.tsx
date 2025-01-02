@@ -15,11 +15,19 @@ declare global {
     }
 }
 
-const WalletConnect: React.FC<{ setTokens: (tokens: Token[]) => void; onError: (error: Error) => void }> = ({ setTokens, onError }) => {
+const METADATA_PROGRAM_ID = new solanaWeb3.PublicKey(
+    'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s'
+);
+
+const WalletConnect: React.FC<{
+    setTokens: (tokens: Token[]) => void;
+    onError: (error: Error) => void;
+}> = ({ setTokens, onError }) => {
     const [isConnected, setIsConnected] = useState(false);
     const [publicKey, setPublicKey] = useState<solanaWeb3.PublicKey | null>(null);
 
-    const rpcUrl = "https://evocative-quiet-field.solana-mainnet.quiknode.pro/42dea1d5cb4751b78f1d7e7dac9e5d628c892fbd/";
+    const rpcUrl =
+        'https://evocative-quiet-field.solana-mainnet.quiknode.pro/42dea1d5cb4751b78f1d7e7dac9e5d628c892fbd/';
 
     useEffect(() => {
         const checkWalletConnection = async () => {
@@ -54,6 +62,45 @@ const WalletConnect: React.FC<{ setTokens: (tokens: Token[]) => void; onError: (
         }
     };
 
+    const getMetadataPDA = async (mint: solanaWeb3.PublicKey) => {
+        const [pda] = await solanaWeb3.PublicKey.findProgramAddress(
+            [
+                Buffer.from('metadata'),
+                METADATA_PROGRAM_ID.toBuffer(),
+                mint.toBuffer(),
+            ],
+            METADATA_PROGRAM_ID
+        );
+        return pda;
+    };
+
+    const fetchTokenMetadata = async (
+        connection: solanaWeb3.Connection,
+        mint: solanaWeb3.PublicKey
+    ) => {
+        try {
+            const metadataPDA = await getMetadataPDA(mint);
+            const accountInfo = await connection.getAccountInfo(metadataPDA);
+
+            if (accountInfo) {
+                const metadata = JSON.parse(accountInfo.data.toString());
+                const logo = metadata?.data?.uri || ''; // URI для логотипа
+                return {
+                    name: metadata.data.name,
+                    symbol: metadata.data.symbol,
+                    logo,
+                };
+            }
+        } catch (error) {
+            console.warn(
+                `Не удалось получить метаданные для ${mint.toBase58()}:`,
+                error
+            );
+        }
+
+        return { name: 'Неизвестный токен', symbol: 'N/A', logo: '' };
+    };
+
     const fetchDelegatedTokens = async () => {
         if (!publicKey) {
             toast.error('Кошелек не подключен.', {
@@ -66,72 +113,65 @@ const WalletConnect: React.FC<{ setTokens: (tokens: Token[]) => void; onError: (
 
         try {
             const connection = new solanaWeb3.Connection(rpcUrl, 'processed');
-            const tokenAccounts = await connection.getParsedTokenAccountsByOwner(publicKey, {
-                programId: TOKEN_PROGRAM_ID,
-            });
+            const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+                publicKey,
+                { programId: TOKEN_PROGRAM_ID }
+            );
 
-            const tokens: Token[] = tokenAccounts.value
-                .map(({ account }) => account.data.parsed.info)
-                .filter((info: any) => info.delegate !== undefined)
-                .map((info: any) => ({
-                    mint: info.mint,
-                    delegate: info.delegate,
-                    delegatedAmount: info.delegatedAmount,
-                    owner: info.owner,
-                }));
+            const tokens: Token[] = await Promise.all(
+                tokenAccounts.value.map(async ({ pubkey, account }) => {
+                    const parsedInfo = account.data.parsed.info;
+                    const mint = new solanaWeb3.PublicKey(parsedInfo.mint);
+                    let name = 'Неизвестный токен';
+                    let symbol = 'N/A';
+                    let logo = '';
+                    const delegate = parsedInfo.delegate
+                        ? new solanaWeb3.PublicKey(parsedInfo.delegate).toBase58()
+                        : '';
 
-            if (tokens.length === 0) {
-                toast.info('У вас нет делегированных токенов.', {
-                    position: 'top-right',
-                    autoClose: 3000,
-                    theme: 'dark',
-                });
-            }
+                    try {
+                        const metadata = await fetchTokenMetadata(connection, mint);
+                        name = metadata.name;
+                        symbol = metadata.symbol;
+                        logo = metadata.logo;
+                    } catch (e) {
+                        console.warn(
+                            `Метаданные не найдены для ${mint.toBase58()}:`,
+                            e
+                        );
+                    }
+
+                    return {
+                        address: pubkey.toBase58(),
+                        mint: parsedInfo.mint,
+                        owner: parsedInfo.owner,
+                        delegate,
+                        amount: parsedInfo.tokenAmount.uiAmount || 0,
+                        decimals: parsedInfo.tokenAmount.decimals,
+                        name,
+                        symbol,
+                        logo,
+                    };
+                })
+            );
 
             setTokens(tokens);
         } catch (error) {
             if (error instanceof Error && error.message.includes('403')) {
-                toast.error('Ошибка доступа: возможно, у вас нет прав для получения делегированных токенов или лимит запросов превышен.', {
-                    position: 'top-right',
-                    autoClose: 3000,
-                    theme: 'dark',
-                });
+                toast.error(
+                    'Ошибка доступа: возможно, у вас нет прав для получения делегированных токенов или лимит запросов превышен.',
+                    {
+                        position: 'top-right',
+                        autoClose: 3000,
+                        theme: 'dark',
+                    }
+                );
             } else {
                 onError(error as Error);
             }
         }
     };
 
-    const generateMockTokens = () => {
-        const mockTokens: Token[] = [
-            {
-                mint: 'MockMint1',
-                delegate: 'Delegate1',
-                delegatedAmount: '1000',
-                owner: 'Owner1',
-            },
-            {
-                mint: 'MockMint2',
-                delegate: 'Delegate2',
-                delegatedAmount: '500',
-                owner: 'Owner2',
-            },
-            {
-                mint: 'MockMint3',
-                delegate: 'Delegate3',
-                delegatedAmount: '2000',
-                owner: 'Owner3',
-            },
-        ];
-
-        setTokens(mockTokens);
-        toast.success('Фиктивные данные токенов загружены!', {
-            position: 'top-right',
-            autoClose: 3000,
-            theme: 'dark',
-        });
-    };
-    
     return (
         <div className="flex items-center space-x-4">
             {isConnected ? (
